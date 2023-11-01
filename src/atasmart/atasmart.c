@@ -130,6 +130,8 @@ struct SkDisk {
         SkBool current_pending_sector_found:1;
         uint64_t reallocated_sector_count;
         uint64_t current_pending_sector;
+        SkBool reallocated_sector_count_bad:1;
+        SkBool current_pending_sector_bad:1;
 
         void *blob;
 };
@@ -923,10 +925,10 @@ int sk_disk_smart_status(SkDisk *d, SkBool *good) {
         /* SAT/USB bridges truncate packets, so we only check for 4F,
          * not for 2C on those */
         if ((d->type == SK_DISK_TYPE_ATA_PASSTHROUGH_12 || cmd[3] == htons(0x00C2U)) &&
-            cmd[4] == htons(0x4F00U))
+            (cmd[4] & htons(0xFF00U)) == htons(0x4F00U))
                 *good = TRUE;
         else if ((d->type == SK_DISK_TYPE_ATA_PASSTHROUGH_12 || cmd[3] == htons(0x002CU)) &&
-                 cmd[4] == htons(0xF400U))
+                 (cmd[4] & htons(0xFF00U)) == htons(0xF400U))
                 *good = FALSE;
         else {
                 errno = EIO;
@@ -2190,16 +2192,23 @@ static void fill_cache_cb(SkDisk *d, const SkSmartAttributeParsedData *a, void* 
         if (a->pretty_unit != SK_SMART_ATTRIBUTE_UNIT_SECTORS)
                 return;
 
+        if (!a->current_value_valid)
+                return;
+
         if (!strcmp(a->name, "reallocated-sector-count")) {
                 if (a->pretty_value > d->reallocated_sector_count)
                         d->reallocated_sector_count = a->pretty_value;
                 d->reallocated_sector_count_found = TRUE;
+                if (a->good_now_valid && !a->good_now)
+                        d->reallocated_sector_count_bad = TRUE;
         }
 
         if (!strcmp(a->name, "current-pending-sector")) {
                 if (a->pretty_value > d->current_pending_sector)
                         d->current_pending_sector = a->pretty_value;
                 d->current_pending_sector_found = TRUE;
+                if (a->good_now_valid && !a->good_now)
+                        d->current_pending_sector_bad = TRUE;
         }
 }
 
@@ -2255,24 +2264,9 @@ const char* sk_smart_overall_to_string(SkSmartOverall overall) {
         return _P(map[overall]);
 }
 
-static uint64_t u64log2(uint64_t n) {
-        unsigned r;
-
-        if (n <= 1)
-                return 0;
-
-        r = 0;
-        for (;;) {
-                n = n >> 1;
-                if (!n)
-                        return r;
-                r++;
-        }
-}
-
 int sk_disk_smart_get_overall(SkDisk *d, SkSmartOverall *overall) {
         SkBool good;
-        uint64_t sectors, sector_threshold;
+        uint64_t sectors;
 
         assert(d);
         assert(overall);
@@ -2293,13 +2287,7 @@ int sk_disk_smart_get_overall(SkDisk *d, SkSmartOverall *overall) {
                         return -1;
                 sectors = 0;
         } else {
-
-                /* We use log2(n_sectors)*1024 as a threshold here. We
-                 * had to pick something, and this makes a bit of
-                 * sense, or doesn't it? */
-                sector_threshold = u64log2(d->size/512) * 1024;
-
-                if (sectors >= sector_threshold) {
+                if (d->reallocated_sector_count_bad || d->current_pending_sector_bad) {
                         *overall = SK_SMART_OVERALL_BAD_SECTOR_MANY;
                         return 0;
                 }
