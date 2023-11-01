@@ -1,0 +1,5 @@
+option('enable-string-pooling',
+  type : 'boolean',
+  value : true,
+  description : 'Enables string pooling.'
+)
